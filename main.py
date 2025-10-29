@@ -28,7 +28,8 @@ async def load_cogs():
 async def main():
     async with bot:
         await load_cogs()
-        await bot.start("OTQyOTk2MjEzNjU2MDgwNDA2.Go0_A3.tVHfH5S6k1NhOUD5IoP0slDOV1iQRVvHCAw4-E")  # ⬅️ Replace with your bot token
+        await bot.start("BOT TOKEN HERE")  # ⬅️ Replace with your bot token
 
 if __name__ == "__main__":
     asyncio.run(main())
+
