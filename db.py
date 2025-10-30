@@ -215,7 +215,7 @@ async def daily_checkin(userid: int, username: str) -> dict:
     return {
         "success": True,
         "message": (
-            f"✅ Congratulations <@{userid}>! Check-in successful.\n"
+            f"Congratulations <@{userid}>! Check-in successful.\n"
             f"You received **{earned} Hive points** and your current streak is now **{streak}🔥**."
         ),
         "color": Color(True)
@@ -350,4 +350,5 @@ async def monthly_reset():
         "message": f"Monthly reset completed successfully. Backup saved to {snapshot_file}.",
         "file": snapshot_file
     }
+
 
