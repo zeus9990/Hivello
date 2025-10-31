@@ -1,6 +1,6 @@
 import motor.motor_asyncio
 from datetime import datetime, timezone, timedelta
-from config import DB_URL, Color, CHECK_IN
+from config import DB_URL, CHECK_IN, GAME_COOLDOWN, Color
 import random, csv, json
 
 """
@@ -11,27 +11,28 @@ User_data = {
                 "username": "",
                 "wallet_address": "",
                 "points": 0,
-                "game_points": 0,
                 "daily": {
                     "checked_in": False,
-                    "last_checkin": "2025-10-24T10:00:00Z",
-                    "total_checkins": 0
+                    "last_checkin": None,
+                    "total_checkins": 0,
                     "streak": 0
                     },
-                "stats": {
+                "game": {
+                    "game_points": 0,
+                    "last_game_at": None,
                     "games_played": 0,
-                    "games_won": 0,
+                    "games_won": 0
                     }
             }
 
 Stats = {
-            "date": "2025-10-24T10:00:00Z",
+            "date": None,
             "total_points": 0,
             "total_game_points": 0,
             "total_games_played": 0,
             "total_games_won": 0
         }
-        
+
 """
 
 database = motor.motor_asyncio.AsyncIOMotorClient(DB_URL)
@@ -47,19 +48,26 @@ async def get_rank(userid: int) -> dict:
         return {
             "success": False,
             "message": f"Sorry <@{userid}> you're not registered yet. Please do a check in to get started.",
-            "status": Color(False)
+            "color": Color(False)
         }
 
-    user_points = user_doc.get("points", 0) + user_doc.get("game_points", 0)
+    user_points = user_doc.get("points", 0) + user_doc.get("game", {}).get("game_points", 0)
     higher_count = await userdata.count_documents({
-        "$expr": {"$gt": [{"$add": ["$points", "$game_points"]}, user_points]}
+        "$expr": {
+            "$gt": [{"$add": ["$points", "$game.game_points"]}, user_points]
+        }
     })
 
     return {
         "success": True,
-        "message": {"username": user_doc['username'], "points": user_points, "rank": higher_count + 1},
+        "message": {
+            "username": user_doc["username"],
+            "points": user_points,
+            "rank": higher_count + 1
+        },
         "color": Color(True)
     }
+
 
 ## Get Leaderboard and rank
 async def get_leaderboard() -> dict:
@@ -69,7 +77,7 @@ async def get_leaderboard() -> dict:
                 "_id": 1,
                 "username": 1,
                 "points": {
-                    "$add": ["$points", "$game_points"]
+                    "$add": ["$points", "$game.game_points"]
                 }
             }
         },
@@ -167,7 +175,7 @@ async def daily_checkin(userid: int, username: str) -> dict:
             if last_checkin == today:
                 return {
                     "success": False,
-                    "message": f"Hey <@{userid}> you've already checked in today, try again tomorrow.",
+                    "message": f"Hey <@{userid}>! you've already checked in for today, try again tomorrow.",
                     "color": Color(False)
                 }
 
@@ -206,7 +214,9 @@ async def daily_checkin(userid: int, username: str) -> dict:
                 "total_checkins": 1,
                 "streak": 1
             },
-            "stats": {
+            "game": {
+                "game_points": 0,
+                "last_game_at": None,
                 "games_played": 0,
                 "games_won": 0
             }
@@ -216,17 +226,96 @@ async def daily_checkin(userid: int, username: str) -> dict:
         "success": True,
         "message": (
             f"Congratulations <@{userid}>! Check-in successful.\n"
-            f"You received **{earned} Hive points** and your current streak is now **{streak}🔥**."
+            f"You received **{earned} Hive points** and your current streak is now **{streak}**."
         ),
         "color": Color(True)
     }
 
+# Update_games
+async def update_games(userid: int, bet: int = 0, points: int = 0, won: bool = None) -> dict:
+    user = await userdata.find_one({"_id": userid})
+    if not user:
+        return {"success": False, "message": f"Sorry <@{userid}>! you are not registered please do a check in and try again.", "color": Color(False)}
+
+    now = datetime.now(timezone.utc)
+    now_str = now.isoformat()
+    last_game_str = user.get("game", {}).get("last_game_at", None)
+
+    if last_game_str:
+        last_game_time = datetime.fromisoformat(last_game_str)
+        elapsed = now - last_game_time
+        cooldown = timedelta(minutes=GAME_COOLDOWN)
+
+        if elapsed < cooldown:
+            remaining = cooldown - elapsed
+            hours, remainder = divmod(remaining.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return {
+                "success": False,
+                "message": (
+                    f"Sorry <@{userid}>! you must wait {hours}h {minutes}m {seconds}s before playing again."
+                ),
+                "color": Color(False)
+            }
+        
+    if points == 0:
+        user_points = user.get("points", 0)
+        game_points = user.get("game", {}).get("game_points", 0)
+        total_points = user_points + game_points
+
+        if bet > total_points:
+            return {
+                "success": False,
+                "message": f"❌ <@{userid}> You don't have enough balance to play! You need **{bet}** Hive points but your balance is **{total_points}** Hive points only.",
+                "color": Color(False)
+            }
+
+        return {
+            "success": True,
+            "message": {
+                "last_game_at": last_game_time,
+                "points": total_points,
+                "can_play": True
+            },
+            "color": Color(True)
+        }
+
+    if won is True:
+        update_fields = {
+            "$inc": {
+                "game.games_played": 1,
+                "game.games_won": 1,
+                "game.game_points": points
+            },
+            "$set": {
+                "game.last_game_at": now_str
+            }
+        }
+    elif won is False:
+        update_fields = {
+            "$inc": {
+                "game.games_played": 1,
+                "game.game_points": -points
+            },
+            "$set": {
+                "game.last_game_at": now_str
+            }
+        }
+
+    await userdata.update_one({"_id": userid}, update_fields)
+
+    return {
+        "success": True,
+        "message": f"Added {points} points to the user.",
+        "color": Color(True)
+    }
+
 # Checks for new date, updates stats, resets daily fields, and exports snapshot CSV.
-async def date_check():
+async def date_check() -> dict:
     today = datetime.now(timezone.utc).date()
     today_str = today.isoformat()
-    last_stats = await stats.find_one(sort=[("date", -1)])
 
+    last_stats = await stats.find_one(sort=[("date", -1)])
     if not last_stats:
         await stats.insert_one({
             "date": today_str,
@@ -252,40 +341,36 @@ async def date_check():
             "$group": {
                 "_id": None,
                 "total_points": {"$sum": "$points"},
-                "total_game_points": {"$sum": "$game_points"},
-                "total_games_played": {"$sum": "$stats.games_played"},
-                "total_games_won": {"$sum": "$stats.games_won"}
+                "total_game_points": {"$sum": "$game.game_points"},
+                "total_games_played": {"$sum": "$game.games_played"},
+                "total_games_won": {"$sum": "$game.games_won"}
             }
         }
     ]
+
     result = await userdata.aggregate(pipeline).to_list(length=1)
-    totals = result[0] if result else {}
+    totals = result[0] if result else {
+        "total_points": 0,
+        "total_game_points": 0,
+        "total_games_played": 0,
+        "total_games_won": 0
+    }
+    totals.pop("_id", None)
     totals["date"] = today_str
 
     await stats.insert_one(totals)
+    await userdata.update_many({}, {"$set": {"daily.checked_in": False}})
 
-    await userdata.update_many(
-        {},
-        {
-            "$set": {
-                "daily.checked_in": False
-            }
-        }
+    users_cursor = userdata.find({})
+    users = await users_cursor.to_list(None)
+    users.sort(
+        key=lambda u: u.get("points", 0) + u.get("game", {}).get("game_points", 0),
+        reverse=True
     )
 
-    users_cursor = userdata.find({}, {
-        "_id": 1,
-        "username": 1,
-        "points": 1,
-        "game_points": 1
-    })
-
-    users = await users_cursor.to_list(None)
-    users.sort(key=lambda u: u.get("points", 0) + u.get("game_points", 0), reverse=True)
-
     # Prepare CSV
-    csv_filename = f"{today_str}.csv"
-    with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
+    csv_file = f"{today_str}.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
             "_id", "username", "total_points"
         ]
@@ -296,19 +381,19 @@ async def date_check():
             row = {
                 "_id": user.get("_id"),
                 "username": user.get("username", ""),
-                "total_points": (user.get("points", 0)+user.get("game_points", 0))
+                "total_points": (user.get("points", 0)+user.get("game", {}).get("game_points", 0))
             }
             writer.writerow(row)
 
     return {
         "success": True,
-        "message": f"New day detected. Stats updated and snapshot saved as {csv_filename}.",
-        "file": csv_filename,
+        "message": f"New day detected. Stats updated and snapshot saved as {csv_file}.",
+        "file": csv_file,
         "color": Color(True)
     }
 
-#Monthly reset and json export
-async def monthly_reset():
+# Monthly reset and json export
+async def monthly_reset() -> dict:
     today = datetime.now(timezone.utc)
     if today.day != 1:
         return {
@@ -331,24 +416,14 @@ async def monthly_reset():
 
     reset_fields = {
         "points": 0,
-        "game_points": 0,
-        "daily": {
-            "checked_in": False,
-            "total_checkins": 0,
-            "streak": 0
-        },
-        "stats": {
-            "games_played": 0,
-            "games_won": 0
+        "game": {
+            "game_points": 0
         }
     }
 
     await userdata.update_many({}, {"$set": reset_fields})
-
     return {
         "success": True,
         "message": f"Monthly reset completed successfully. Backup saved to {snapshot_file}.",
         "file": snapshot_file
     }
-
-
